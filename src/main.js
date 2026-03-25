@@ -8,6 +8,7 @@ import DragPan from 'ol/interaction/DragPan';
 import Feature from 'ol/Feature';
 import { Fill, Stroke, Style } from 'ol/style';
 import { fromLonLat, transform } from 'ol/proj';
+import { createEmpty, extend as extendExtent, getCenter, isEmpty as isEmptyExtent } from 'ol/extent';
 
 const originLatEl = document.getElementById('origin-lat');
 const currentLatEl = document.getElementById('current-lat');
@@ -31,6 +32,10 @@ function createRenderGeometry(feature) {
   const sourceGeometry4326 = feature.get('sourceGeometry4326');
   const originCenter4326 = feature.get('originCenter4326');
   const displayCenter4326 = feature.get('displayCenter4326');
+  if (!sourceGeometry4326 || !originCenter4326 || !displayCenter4326) {
+    console.warn('[TrueSize] Missing geometry metadata for feature:', feature.getId?.(), feature.getProperties?.());
+    return { geometry: null, scale: 1 };
+  }
 
   const renderGeometry4326 = sourceGeometry4326.clone();
   const dx = displayCenter4326[0] - originCenter4326[0];
@@ -55,6 +60,7 @@ function createRenderGeometry(feature) {
 function updateInfoPanel(feature) {
   const originCenter = feature.get('originCenter4326');
   const displayCenter = feature.get('displayCenter4326');
+  if (!originCenter || !displayCenter) return;
   const originalLatRad = (originCenter[1] * Math.PI) / 180;
   const targetLatRad = (displayCenter[1] * Math.PI) / 180;
   const scale = Math.cos(originalLatRad) / Math.max(Math.cos(targetLatRad), 1e-6);
@@ -67,8 +73,16 @@ function updateInfoPanel(feature) {
 const vectorLayer = new VectorLayer({
   source: vectorSource,
   style: (feature) => {
-    const { geometry } = createRenderGeometry(feature);
-    countryStyle.setGeometry(geometry);
+    try {
+      const { geometry } = createRenderGeometry(feature);
+      if (!geometry) {
+        return null;
+      }
+      countryStyle.setGeometry(geometry);
+    } catch (error) {
+      console.error('[TrueSize] Failed to build render geometry:', error, feature.getProperties?.());
+      return null;
+    }
     return countryStyle;
   },
 });
@@ -168,27 +182,70 @@ async function loadCountryFeature() {
   const geojson = await response.json();
 
   const format = new GeoJSON();
-  const parsedFeature = format.readFeature(geojson.features[0], {
+  const parsedFeatures = format.readFeatures(geojson, {
     dataProjection: 'EPSG:4326',
     featureProjection: 'EPSG:4326',
   });
+  console.info(`[TrueSize] Loaded GeoJSON features: ${parsedFeatures.length}`);
 
-  const sourceGeometry4326 = parsedFeature.getGeometry();
-  const originCenter4326 = sourceGeometry4326.getInteriorPoint().getCoordinates();
+  const loadedExtent3857 = createEmpty();
+  const validFeatures = [];
+  for (const parsedFeature of parsedFeatures) {
+    const sourceGeometry4326 = parsedFeature.getGeometry();
+    if (!sourceGeometry4326) {
+      console.warn('[TrueSize] Skip feature without geometry:', parsedFeature.getProperties?.());
+      continue;
+    }
 
-  // 지도 hit-detection 기본 geometry(초기 렌더 상태)
-  const initialGeometry3857 = sourceGeometry4326.clone().transform('EPSG:4326', 'EPSG:3857');
+    const geometryType = sourceGeometry4326.getType();
+    let originCenter4326 = null;
+    if (geometryType === 'Polygon') {
+      originCenter4326 = sourceGeometry4326.getInteriorPoint().getCoordinates();
+    } else if (geometryType === 'MultiPolygon') {
+      originCenter4326 = getCenter(sourceGeometry4326.getExtent());
+    } else {
+      console.warn(`[TrueSize] Skip unsupported geometry type: ${geometryType}`);
+      continue;
+    }
 
-  const feature = new Feature({
-    geometry: initialGeometry3857,
-    sourceGeometry4326,
-    originCenter4326,
-    displayCenter4326: originCenter4326.slice(),
-    name: parsedFeature.get('name'),
-  });
+    if (!originCenter4326 || !Number.isFinite(originCenter4326[0]) || !Number.isFinite(originCenter4326[1])) {
+      console.warn(`[TrueSize] Skip invalid center for geometry type ${geometryType}`);
+      continue;
+    }
 
-  vectorSource.addFeature(feature);
-  updateInfoPanel(feature);
+    // 지도 hit-detection 기본 geometry(초기 렌더 상태)
+    const initialGeometry3857 = sourceGeometry4326.clone().transform('EPSG:4326', 'EPSG:3857');
+    const extent3857 = initialGeometry3857.getExtent();
+    if (isEmptyExtent(extent3857)) {
+      console.warn('[TrueSize] Skip feature with empty extent:', parsedFeature.getProperties?.());
+      continue;
+    }
+
+    console.info(`[TrueSize] Feature geometry=${geometryType}, extent4326=${sourceGeometry4326.getExtent().join(',')}`);
+    const feature = new Feature({
+      geometry: initialGeometry3857,
+      sourceGeometry4326,
+      originCenter4326,
+      displayCenter4326: originCenter4326.slice(),
+      name: parsedFeature.get('name'),
+    });
+
+    validFeatures.push(feature);
+    extendExtent(loadedExtent3857, extent3857);
+  }
+
+  vectorSource.clear();
+  vectorSource.addFeatures(validFeatures);
+  console.info(`[TrueSize] Renderable features: ${validFeatures.length}`);
+
+  if (validFeatures.length > 0 && !isEmptyExtent(loadedExtent3857)) {
+    map.getView().fit(loadedExtent3857, {
+      padding: [40, 40, 40, 40],
+      maxZoom: 5,
+      duration: 250,
+    });
+    updateInfoPanel(validFeatures[0]);
+  }
 }
 
 loadCountryFeature();
