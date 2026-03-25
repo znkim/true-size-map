@@ -57,7 +57,10 @@ function createRenderGeometry(feature) {
   const scale = Math.cos(originalLatRad) / safeCosTarget;
 
   const displayCenter3857 = fromLonLat(displayCenter4326);
-  renderGeometry3857.scale(scale, scale, displayCenter3857);
+  // 4326 -> 3857 변환 후에는 위도 이동에 따라 남북(y) 길이가 이미 비선형으로 변한다.
+  // 기존 uniform scale은 y도 함께 과하게 키우며, 사용자가 기대하는 동서(x) 변화가 상대적으로 약하게 보일 수 있다.
+  // 따라서 true-size 보정은 x 축 중심으로 적용해 동서 방향 변화가 더 자연스럽게 보이도록 조정한다.
+  renderGeometry3857.scale(scale, 1, displayCenter3857);
 
   return { geometry: renderGeometry3857, scale };
 }
@@ -89,7 +92,7 @@ function getCountrySearchKeys(properties = {}) {
 }
 
 function buildRenderableCountryFeature(parsedFeature) {
-  const sourceGeometry4326 = parsedFeature.getGeometry();
+  const sourceGeometry4326 = parsedFeature.getGeometry()?.clone();
   if (!sourceGeometry4326) return null;
 
   const geometryType = sourceGeometry4326.getType();
@@ -123,7 +126,7 @@ function showCountryOnMap(parsedFeature) {
   vectorSource.clear();
   vectorSource.addFeature(countryFeature);
 
-  const renderGeometry3857 = countryFeature.get('geometry');
+  const { geometry: renderGeometry3857 } = createRenderGeometry(countryFeature);
   if (renderGeometry3857) {
     map.getView().fit(renderGeometry3857.getExtent(), {
       padding: [48, 48, 48, 48],
