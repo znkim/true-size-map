@@ -8,6 +8,14 @@
   <body>
     <div id="app">
       <div id="map" class="map"></div>
+      <section class="search-panel">
+        <label for="country-search-input">국가 검색</label>
+        <div class="search-row">
+          <input id="country-search-input" type="text" placeholder="예: South Korea, Japan, KR" />
+          <button id="country-search-button" type="button">검색</button>
+        </div>
+        <p id="country-search-status" class="search-status">기본 표시: 대한민국</p>
+      </section>
       <aside class="info-panel">
         <h1>True Size Map Demo</h1>
         <p>국가 폴리곤을 드래그해 위도에 따른 크기 변화를 확인하세요.</p>
