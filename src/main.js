@@ -1,6 +1,7 @@
+import 'ol/ol.css';
 import './style.css';
 import GeoJSON from 'ol/format/GeoJSON';
-import Map from 'ol/Map';
+import OLMap from 'ol/Map';
 import View from 'ol/View';
 import { OSM, Vector as VectorSource } from 'ol/source';
 import { Tile as TileLayer, Vector as VectorLayer } from 'ol/layer';
@@ -8,13 +9,17 @@ import DragPan from 'ol/interaction/DragPan';
 import Feature from 'ol/Feature';
 import { Fill, Stroke, Style } from 'ol/style';
 import { fromLonLat, transform } from 'ol/proj';
-import { createEmpty, extend as extendExtent, getCenter, isEmpty as isEmptyExtent } from 'ol/extent';
+import { getCenter } from 'ol/extent';
 
 const originLatEl = document.getElementById('origin-lat');
 const currentLatEl = document.getElementById('current-lat');
 const scaleValueEl = document.getElementById('scale-value');
+const countrySearchInputEl = document.getElementById('country-search-input');
+const countrySearchButtonEl = document.getElementById('country-search-button');
+const countrySearchStatusEl = document.getElementById('country-search-status');
 
 const vectorSource = new VectorSource();
+const countryFeatureMap = new Map();
 
 const countryStyle = new Style({
   fill: new Fill({ color: 'rgba(255, 87, 34, 0.45)' }),
@@ -70,6 +75,67 @@ function updateInfoPanel(feature) {
   scaleValueEl.textContent = scale.toFixed(4);
 }
 
+function normalizeCountryText(value) {
+  return String(value ?? '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function getCountrySearchKeys(properties = {}) {
+  const candidateKeys = ['name', 'NAME', 'ADMIN', 'admin', 'sovereignt', 'SOVEREIGNT', 'ISO3166-1-Alpha-2', 'ISO3166-1-Alpha-3'];
+  const values = candidateKeys.map((key) => properties[key]).filter((value) => typeof value === 'string' && value.trim().length > 0);
+  return [...new Set(values.map(normalizeCountryText).filter(Boolean))];
+}
+
+function buildRenderableCountryFeature(parsedFeature) {
+  const sourceGeometry4326 = parsedFeature.getGeometry();
+  if (!sourceGeometry4326) return null;
+
+  const geometryType = sourceGeometry4326.getType();
+  let originCenter4326 = null;
+  if (geometryType === 'Polygon') {
+    originCenter4326 = sourceGeometry4326.getInteriorPoint().getCoordinates();
+  } else if (geometryType === 'MultiPolygon') {
+    originCenter4326 = getCenter(sourceGeometry4326.getExtent());
+  } else {
+    return null;
+  }
+
+  if (!originCenter4326 || !Number.isFinite(originCenter4326[0]) || !Number.isFinite(originCenter4326[1])) {
+    return null;
+  }
+
+  const initialGeometry3857 = sourceGeometry4326.clone().transform('EPSG:4326', 'EPSG:3857');
+  return new Feature({
+    geometry: initialGeometry3857,
+    sourceGeometry4326,
+    originCenter4326,
+    displayCenter4326: originCenter4326.slice(),
+    name: parsedFeature.get('name') ?? parsedFeature.get('NAME') ?? parsedFeature.get('ADMIN') ?? 'Unknown Country',
+  });
+}
+
+function showCountryOnMap(parsedFeature) {
+  const countryFeature = buildRenderableCountryFeature(parsedFeature);
+  if (!countryFeature) return null;
+
+  vectorSource.clear();
+  vectorSource.addFeature(countryFeature);
+
+  const renderGeometry3857 = countryFeature.get('geometry');
+  if (renderGeometry3857) {
+    map.getView().fit(renderGeometry3857.getExtent(), {
+      padding: [48, 48, 48, 48],
+      maxZoom: 6,
+      duration: 250,
+    });
+  }
+
+  updateInfoPanel(countryFeature);
+  return countryFeature;
+}
+
 const vectorLayer = new VectorLayer({
   source: vectorSource,
   style: (feature) => {
@@ -87,7 +153,7 @@ const vectorLayer = new VectorLayer({
   },
 });
 
-const map = new Map({
+const map = new OLMap({
   target: 'map',
   layers: [
     new TileLayer({ source: new OSM() }),
@@ -177,6 +243,30 @@ map.getViewport().addEventListener('mouseleave', () => {
   });
 });
 
+function registerCountrySearch(parsedFeature) {
+  const searchKeys = getCountrySearchKeys(parsedFeature.getProperties?.() ?? {});
+  for (const key of searchKeys) {
+    if (!countryFeatureMap.has(key)) {
+      countryFeatureMap.set(key, parsedFeature);
+    }
+  }
+}
+
+function findCountryFeatureByName(query) {
+  const normalizedQuery = normalizeCountryText(query);
+  if (!normalizedQuery) return null;
+  if (countryFeatureMap.has(normalizedQuery)) {
+    return countryFeatureMap.get(normalizedQuery);
+  }
+
+  for (const [countryKey, countryFeature] of countryFeatureMap.entries()) {
+    if (countryKey.includes(normalizedQuery)) {
+      return countryFeature;
+    }
+  }
+  return null;
+}
+
 async function loadCountryFeature() {
   const response = await fetch('/src/data/countries.geojson');
   const geojson = await response.json();
@@ -188,64 +278,36 @@ async function loadCountryFeature() {
   });
   console.info(`[TrueSize] Loaded GeoJSON features: ${parsedFeatures.length}`);
 
-  const loadedExtent3857 = createEmpty();
-  const validFeatures = [];
   for (const parsedFeature of parsedFeatures) {
-    const sourceGeometry4326 = parsedFeature.getGeometry();
-    if (!sourceGeometry4326) {
-      console.warn('[TrueSize] Skip feature without geometry:', parsedFeature.getProperties?.());
-      continue;
-    }
-
-    const geometryType = sourceGeometry4326.getType();
-    let originCenter4326 = null;
-    if (geometryType === 'Polygon') {
-      originCenter4326 = sourceGeometry4326.getInteriorPoint().getCoordinates();
-    } else if (geometryType === 'MultiPolygon') {
-      originCenter4326 = getCenter(sourceGeometry4326.getExtent());
-    } else {
-      console.warn(`[TrueSize] Skip unsupported geometry type: ${geometryType}`);
-      continue;
-    }
-
-    if (!originCenter4326 || !Number.isFinite(originCenter4326[0]) || !Number.isFinite(originCenter4326[1])) {
-      console.warn(`[TrueSize] Skip invalid center for geometry type ${geometryType}`);
-      continue;
-    }
-
-    // 지도 hit-detection 기본 geometry(초기 렌더 상태)
-    const initialGeometry3857 = sourceGeometry4326.clone().transform('EPSG:4326', 'EPSG:3857');
-    const extent3857 = initialGeometry3857.getExtent();
-    if (isEmptyExtent(extent3857)) {
-      console.warn('[TrueSize] Skip feature with empty extent:', parsedFeature.getProperties?.());
-      continue;
-    }
-
-    console.info(`[TrueSize] Feature geometry=${geometryType}, extent4326=${sourceGeometry4326.getExtent().join(',')}`);
-    const feature = new Feature({
-      geometry: initialGeometry3857,
-      sourceGeometry4326,
-      originCenter4326,
-      displayCenter4326: originCenter4326.slice(),
-      name: parsedFeature.get('name'),
-    });
-
-    validFeatures.push(feature);
-    extendExtent(loadedExtent3857, extent3857);
+    registerCountrySearch(parsedFeature);
   }
 
-  vectorSource.clear();
-  vectorSource.addFeatures(validFeatures);
-  console.info(`[TrueSize] Renderable features: ${validFeatures.length}`);
-
-  if (validFeatures.length > 0 && !isEmptyExtent(loadedExtent3857)) {
-    map.getView().fit(loadedExtent3857, {
-      padding: [40, 40, 40, 40],
-      maxZoom: 5,
-      duration: 250,
-    });
-    updateInfoPanel(validFeatures[0]);
+  const koreaFeature = findCountryFeatureByName('south korea') ?? findCountryFeatureByName('korea republic');
+  if (!koreaFeature) {
+    console.warn('[TrueSize] South Korea feature not found.');
+    return;
   }
+  showCountryOnMap(koreaFeature);
 }
+
+function handleCountrySearch() {
+  const query = countrySearchInputEl.value;
+  const matchedFeature = findCountryFeatureByName(query);
+  if (!matchedFeature) {
+    countrySearchStatusEl.textContent = '국가를 찾을 수 없습니다.';
+    return;
+  }
+
+  showCountryOnMap(matchedFeature);
+  const countryName = matchedFeature.get('name') ?? matchedFeature.get('NAME') ?? matchedFeature.get('ADMIN') ?? query;
+  countrySearchStatusEl.textContent = `${countryName} 표시 완료`;
+}
+
+countrySearchButtonEl.addEventListener('click', handleCountrySearch);
+countrySearchInputEl.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    handleCountrySearch();
+  }
+});
 
 loadCountryFeature();
