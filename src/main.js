@@ -4,6 +4,7 @@ import Map from 'ol/Map';
 import View from 'ol/View';
 import { OSM, Vector as VectorSource } from 'ol/source';
 import { Tile as TileLayer, Vector as VectorLayer } from 'ol/layer';
+import DragPan from 'ol/interaction/DragPan';
 import Feature from 'ol/Feature';
 import { Fill, Stroke, Style } from 'ol/style';
 import { fromLonLat, transform } from 'ol/proj';
@@ -93,18 +94,30 @@ const dragState = {
   activeFeature: null,
   startPointer4326: null,
   startDisplayCenter4326: null,
+  draggingFeature: false,
 };
 
 map.on('pointerdown', (event) => {
   const feature = map.forEachFeatureAtPixel(event.pixel, (hitFeature) => hitFeature);
+  dragState.draggingFeature = Boolean(feature);
+
+  map.getInteractions().forEach((interaction) => {
+    if (interaction instanceof DragPan) {
+      interaction.setActive(!dragState.draggingFeature);
+    }
+  });
+
   if (!feature) return;
 
   dragState.activeFeature = feature;
   dragState.startPointer4326 = transform(event.coordinate, 'EPSG:3857', 'EPSG:4326');
   dragState.startDisplayCenter4326 = feature.get('displayCenter4326').slice();
+
+  event.preventDefault();
+  event.stopPropagation();
 });
 
-map.on('pointermove', (event) => {
+map.on('pointerdrag', (event) => {
   if (!dragState.activeFeature || !dragState.startPointer4326) return;
 
   const currentPointer4326 = transform(event.coordinate, 'EPSG:3857', 'EPSG:4326');
@@ -119,18 +132,35 @@ map.on('pointermove', (event) => {
   dragState.activeFeature.set('displayCenter4326', nextCenter);
   dragState.activeFeature.changed();
   updateInfoPanel(dragState.activeFeature);
+
+  event.preventDefault();
+  event.stopPropagation();
 });
 
 map.on('pointerup', () => {
   dragState.activeFeature = null;
   dragState.startPointer4326 = null;
   dragState.startDisplayCenter4326 = null;
+  dragState.draggingFeature = false;
+
+  map.getInteractions().forEach((interaction) => {
+    if (interaction instanceof DragPan) {
+      interaction.setActive(true);
+    }
+  });
 });
 
 map.getViewport().addEventListener('mouseleave', () => {
   dragState.activeFeature = null;
   dragState.startPointer4326 = null;
   dragState.startDisplayCenter4326 = null;
+  dragState.draggingFeature = false;
+
+  map.getInteractions().forEach((interaction) => {
+    if (interaction instanceof DragPan) {
+      interaction.setActive(true);
+    }
+  });
 });
 
 async function loadCountryFeature() {
