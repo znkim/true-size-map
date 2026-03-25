@@ -178,7 +178,7 @@ map.getViewport().addEventListener('mouseleave', () => {
 });
 
 async function loadCountryFeature() {
-  const response = await fetch('/src/data/country.geojson');
+  const response = await fetch('/src/data/countries.geojson');
   const geojson = await response.json();
 
   const format = new GeoJSON();
